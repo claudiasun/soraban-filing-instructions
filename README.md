@@ -80,7 +80,6 @@ python analyze_validation.py filing_instructions_validated.parquet
 - `pdf_url` - Filename
 - `num_pages` - Number of pages
 - `money_amounts` - Extracted amounts (comma-separated)
-- `text_preview` - First 500 chars of text
 - `full_text` - Complete OCR text
 
 ### AI Validation Columns (Added by LLM Judge)

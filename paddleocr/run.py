@@ -74,10 +74,6 @@ def process_pdf(pdf_path, ocr):
         
         # Combine all pages into single row
         combined_text = "\n\n".join(all_texts)
-        
-        # Create text preview (first 500 chars) for easier visualization
-        text_preview = combined_text[:500] + "..." if len(combined_text) > 500 else combined_text
-        
         # Return result data for this PDF
         unique_money = sorted(set(all_money_amounts))
         print(f"✓ Completed - Found {len(unique_money)} unique money amounts")
@@ -86,7 +82,6 @@ def process_pdf(pdf_path, ocr):
             'pdf_url': pdf_filename,
             'num_pages': len(images),
             'money_amounts': ', '.join(unique_money),  # Deduplicated and sorted
-            'text_preview': text_preview,
             'full_text': combined_text
         }
     except Exception as e:
@@ -95,7 +90,6 @@ def process_pdf(pdf_path, ocr):
             'pdf_url': pdf_filename,
             'num_pages': 0,
             'money_amounts': '',
-            'text_preview': f'Error: {str(e)}',
             'full_text': f'Error: {str(e)}'
         }
 

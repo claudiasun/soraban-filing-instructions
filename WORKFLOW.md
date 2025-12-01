@@ -30,7 +30,6 @@
 │  • pdf_url: "Drake - Penalty_Redacted.pdf"                      │
 │  • num_pages: 3                                                  │
 │  • money_amounts: "$1,234.56, $789.00"                          │
-│  • text_preview: "Payment Due\nAmount: $1,234..."              │
 │  • full_text: "Payment Due\nAmount: $1,234.56\n..."            │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
