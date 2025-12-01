@@ -117,38 +117,6 @@ def analyze_validation(parquet_file: str):
     ]
     print(f"Perfect extractions: {len(perfect)} / {len(df)} ({len(perfect)/len(df)*100:.1f}%)")
     
-    # Export detailed report
-    print(f"\n💾 EXPORTING DETAILED REPORT")
-    print(f"{'-'*80}")
-    
-    # Create detailed report
-    report_df = df[[
-        'pdf_url', 'num_pages', 'money_amounts', 'is_aligned', 'is_reasonable',
-        'confidence', 'amounts_found_by_llm', 'missing_amounts', 
-        'incorrect_amounts', 'note'
-    ]].copy()
-    
-    # Add review flag
-    report_df['needs_review'] = (df['confidence'] < 0.7) | (~df['is_aligned'])
-    
-    # Sort by confidence (lowest first)
-    report_df = report_df.sort_values('confidence')
-    
-    # Export to CSV
-    csv_file = parquet_file.replace('.parquet', '_analysis.csv')
-    report_df.to_csv(csv_file, index=False)
-    print(f"✓ Detailed report saved to: {csv_file}")
-    
-    # Export documents needing review
-    if len(needs_review) > 0:
-        review_file = parquet_file.replace('.parquet', '_needs_review.csv')
-        review_df = needs_review[[
-            'pdf_url', 'money_amounts', 'amounts_found_by_llm',
-            'missing_amounts', 'incorrect_amounts', 'confidence', 'note'
-        ]]
-        review_df.to_csv(review_file, index=False)
-        print(f"✓ Review list saved to: {review_file}")
-    
     print(f"\n{'='*80}")
     print(f"SUMMARY")
     print(f"{'='*80}")
