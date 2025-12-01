@@ -11,7 +11,7 @@ It adds validation columns to the parquet file:
 - value_bbox: Bounding boxes of money amounts in the image
 
 Usage:
-  python llm_judge.py <input.parquet> [output.parquet] [--provider openai|anthropic]
+  python llm_judge.py <input.parquet> [output.parquet] [--provider openai|anthropic|google]
 """
 
 import sys
@@ -23,6 +23,13 @@ from typing import Dict, List, Optional, Tuple
 import base64
 from io import BytesIO
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, will use system environment variables
+
 try:
     import pandas as pd
 except ImportError:
@@ -32,6 +39,7 @@ except ImportError:
 try:
     from pdf2image import convert_from_path
     import numpy as np
+    from PIL import Image
 except ImportError:
     print("Error: pdf2image is not installed. Install it with: pip install pdf2image")
     sys.exit(1)
@@ -51,7 +59,7 @@ class LLMJudge:
         Initialize LLM judge.
         
         Args:
-            provider: "openai" or "anthropic"
+            provider: "openai", "anthropic", or "google"
             model: Specific model name (optional, uses defaults)
         """
         self.provider = provider.lower()
@@ -60,7 +68,7 @@ class LLMJudge:
             try:
                 import openai
                 self.client = openai.OpenAI()
-                self.model = model or "gpt-4o"  # gpt-4o has vision capabilities
+                self.model = model or "gpt-5"  # gpt-4o has vision capabilities
             except ImportError:
                 print("Error: openai package not installed. Install with: pip install openai")
                 sys.exit(1)
@@ -81,8 +89,25 @@ class LLMJudge:
                 print(f"Error initializing Anthropic client: {e}")
                 print("Make sure ANTHROPIC_API_KEY environment variable is set")
                 sys.exit(1)
+                
+        elif self.provider == "google":
+            try:
+                import google.generativeai as genai
+                api_key = os.environ.get("GOOGLE_API_KEY")
+                if not api_key:
+                    raise ValueError("GOOGLE_API_KEY environment variable is not set")
+                genai.configure(api_key=api_key)
+                self.model = model or "gemini-3-pro-preview"
+                self.client = genai.GenerativeModel(self.model)
+            except ImportError:
+                print("Error: google-generativeai package not installed. Install with: pip install google-generativeai")
+                sys.exit(1)
+            except Exception as e:
+                print(f"Error initializing Google Gemini client: {e}")
+                print("Make sure GOOGLE_API_KEY environment variable is set")
+                sys.exit(1)
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Use 'openai' or 'anthropic'")
+            raise ValueError(f"Unsupported provider: {provider}. Use 'openai', 'anthropic', or 'google'")
         
         print(f"✓ Initialized {self.provider} with model {self.model}")
     
@@ -136,8 +161,10 @@ Return ONLY a valid JSON object, no other text."""
 
         if self.provider == "openai":
             return self._call_openai(image, prompt)
-        else:
+        elif self.provider == "anthropic":
             return self._call_anthropic(image, prompt)
+        else:
+            return self._call_google(image, prompt)
     
     def _call_openai(self, image, prompt: str) -> Dict:
         """Call OpenAI GPT-4 Vision API."""
@@ -162,9 +189,7 @@ Return ONLY a valid JSON object, no other text."""
                             }
                         ]
                     }
-                ],
-                max_tokens=2000,
-                temperature=0.1  # Low temperature for consistency
+                ]
             )
             
             content = response.choices[0].message.content
@@ -236,6 +261,78 @@ Return ONLY a valid JSON object, no other text."""
                 "missing_amounts": [],
                 "incorrect_amounts": []
             }
+    
+    def _call_google(self, image, prompt: str) -> Dict:
+        """Call Google Gemini Vision API."""
+        try:
+            import google.generativeai as genai
+            
+            # Gemini expects PIL Image directly
+            response = self.client.generate_content(
+                [prompt, image],
+                generation_config=genai.GenerationConfig(
+                    temperature=0.1,
+                    max_output_tokens=2000,
+                )
+            )
+            
+            content = response.text
+            # Extract JSON from response
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+            else:
+                return json.loads(content)
+                
+        except Exception as e:
+            print(f"Error calling Google Gemini API: {e}")
+            return {
+                "is_aligned": False,
+                "is_reasonable": False,
+                "note": f"Error calling LLM: {str(e)}",
+                "confidence": 0.0,
+                "amounts_found": [],
+                "missing_amounts": [],
+                "incorrect_amounts": []
+            }
+
+
+def concatenate_images_vertically(images: List) -> Image.Image:
+    """
+    Concatenate multiple PIL images vertically into a single image.
+    
+    Args:
+        images: List of PIL Image objects
+        
+    Returns:
+        Single PIL Image with all images stacked vertically
+    """
+    if not images:
+        raise ValueError("No images to concatenate")
+    
+    if len(images) == 1:
+        return images[0]
+    
+    # Calculate dimensions for the concatenated image
+    widths = [img.width for img in images]
+    heights = [img.height for img in images]
+    
+    # Use the maximum width and sum of heights
+    max_width = max(widths)
+    total_height = sum(heights)
+    
+    # Create new image with white background
+    combined_image = Image.new('RGB', (max_width, total_height), color='white')
+    
+    # Paste each image
+    y_offset = 0
+    for img in images:
+        # Center the image horizontally if it's narrower than max_width
+        x_offset = (max_width - img.width) // 2
+        combined_image.paste(img, (x_offset, y_offset))
+        y_offset += img.height
+    
+    return combined_image
 
 
 def extract_bounding_boxes(pdf_path: str) -> Dict[int, List[Dict]]:
@@ -366,14 +463,14 @@ def validate_parquet(input_path: str, output_path: str, provider: str = "openai"
         print("Converting PDF to images...")
         images = convert_from_path(pdf_path, dpi=200)
         
-        # Combine all pages into single validation (you could also validate per page)
-        # For multi-page docs, we'll create a combined image or validate the first page
+        # Combine all pages into single validation
         if len(images) == 1:
             main_image = images[0]
+            print("Single-page document")
         else:
-            # For multi-page, validate first page (you can extend this)
-            main_image = images[0]
-            print(f"Note: Multi-page document ({len(images)} pages), validating page 1")
+            # For multi-page, concatenate all pages vertically
+            print(f"Multi-page document ({len(images)} pages), concatenating all pages...")
+            main_image = concatenate_images_vertically(images)
         
         # Call LLM judge
         print("Calling LLM for validation...")
@@ -427,6 +524,9 @@ Examples:
   # Validate with Anthropic Claude
   python llm_judge.py results.parquet validated_results.parquet --provider anthropic
   
+  # Validate with Google Gemini
+  python llm_judge.py results.parquet validated_results.parquet --provider google
+  
   # Specify PDF directory
   python llm_judge.py results.parquet validated_results.parquet --pdf-dir "Filing instructions"
         """
@@ -434,7 +534,7 @@ Examples:
     
     parser.add_argument("input_parquet", help="Input parquet file with OCR results")
     parser.add_argument("output_parquet", nargs='?', help="Output parquet file with validation (default: input_validated.parquet)")
-    parser.add_argument("--provider", choices=["openai", "anthropic"], default="openai",
+    parser.add_argument("--provider", choices=["openai", "anthropic", "google"], default="openai",
                        help="LLM provider to use (default: openai)")
     parser.add_argument("--model", help="Specific model name (optional)")
     parser.add_argument("--pdf-dir", help="Directory containing PDF files")
