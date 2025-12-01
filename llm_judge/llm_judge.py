@@ -6,7 +6,7 @@ This script uses an LLM to validate money amounts extracted from PDFs using Padd
 It adds validation columns to the parquet file:
 - is_aligned: True/False if values in image align with extracted data
 - is_reasonable: True/False if values fall in reasonable range
-- note: Explanation if not aligned or unreasonable
+- llm_note: Explanation if not aligned or unreasonable
 - confidence: 0-1 score indicating if human verification is needed
 - value_bbox: Bounding boxes of money amounts in the image
 
@@ -142,7 +142,7 @@ Please analyze the image and provide a JSON response with the following fields:
 
 1. "is_aligned": true or false - Do the extracted amounts align with what you see in the image?
 2. "is_reasonable": true or false - Are the amounts reasonable for a tax/financial document?
-3. "note": string - Explanation if not aligned or unreasonable. Include what amounts you actually see.
+3. "llm_note": string - Explanation if not aligned or unreasonable. Include what amounts you actually see.
 4. "confidence": number between 0 and 1 - How confident are you? (1 = very confident, 0 = needs human review)
 5. "amounts_found": list of strings - All money amounts you can identify in the image
 6. "missing_amounts": list of strings - Amounts you see but weren't extracted
@@ -203,7 +203,7 @@ Return ONLY a valid JSON object, no other text."""
             return {
                 "is_aligned": False,
                 "is_reasonable": False,
-                "note": f"Error calling LLM: {str(e)}",
+                "llm_note": f"Error calling LLM: {str(e)}",
                 "confidence": 0.0,
                 "amounts_found": [],
                 "missing_amounts": [],
@@ -253,7 +253,7 @@ Return ONLY a valid JSON object, no other text."""
             return {
                 "is_aligned": False,
                 "is_reasonable": False,
-                "note": f"Error calling LLM: {str(e)}",
+                "llm_note": f"Error calling LLM: {str(e)}",
                 "confidence": 0.0,
                 "amounts_found": [],
                 "missing_amounts": [],
@@ -287,7 +287,7 @@ Return ONLY a valid JSON object, no other text."""
             return {
                 "is_aligned": False,
                 "is_reasonable": False,
-                "note": f"Error calling LLM: {str(e)}",
+                "llm_note": f"Error calling LLM: {str(e)}",
                 "confidence": 0.0,
                 "amounts_found": [],
                 "missing_amounts": [],
@@ -407,7 +407,7 @@ def validate_parquet(input_path: str, output_path: str, provider: str = "openai"
     # Initialize new columns
     df['is_aligned'] = None
     df['is_reasonable'] = None
-    df['note'] = None
+    df['llm_note'] = None
     df['confidence'] = None
     df['value_bbox'] = None
     df['amounts_found_by_llm'] = None
@@ -445,7 +445,7 @@ def validate_parquet(input_path: str, output_path: str, provider: str = "openai"
             print(f"⚠ Warning: PDF not found: {pdf_filename}")
             df.at[idx, 'is_aligned'] = False
             df.at[idx, 'is_reasonable'] = False
-            df.at[idx, 'note'] = f"PDF file not found: {pdf_filename}"
+            df.at[idx, 'llm_note'] = f"PDF file not found: {pdf_filename}"
             df.at[idx, 'confidence'] = 0.0
             df.at[idx, 'value_bbox'] = "[]"
             continue
@@ -477,7 +477,7 @@ def validate_parquet(input_path: str, output_path: str, provider: str = "openai"
         # Update dataframe
         df.at[idx, 'is_aligned'] = validation_result.get('is_aligned', False)
         df.at[idx, 'is_reasonable'] = validation_result.get('is_reasonable', False)
-        df.at[idx, 'note'] = validation_result.get('note', '')
+        df.at[idx, 'llm_note'] = validation_result.get('llm_note', '')
         df.at[idx, 'confidence'] = validation_result.get('confidence', 0.0)
         df.at[idx, 'amounts_found_by_llm'] = ', '.join(validation_result.get('amounts_found', []))
         df.at[idx, 'missing_amounts'] = ', '.join(validation_result.get('missing_amounts', []))
@@ -487,7 +487,7 @@ def validate_parquet(input_path: str, output_path: str, provider: str = "openai"
         print(f"  - Aligned: {validation_result.get('is_aligned')}")
         print(f"  - Reasonable: {validation_result.get('is_reasonable')}")
         print(f"  - Confidence: {validation_result.get('confidence')}")
-        print(f"  - Note: {validation_result.get('note', 'N/A')}")
+        print(f"  - LLM Note: {validation_result.get('llm_note', 'N/A')}")
     
     # Save updated parquet
     print(f"\n{'='*80}")
