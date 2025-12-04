@@ -97,7 +97,7 @@ class LLMJudge:
                 if not api_key:
                     raise ValueError("GOOGLE_API_KEY environment variable is not set")
                 genai.configure(api_key=api_key)
-                self.model = model or "gemini-3-pro-preview"
+                self.model = model or "gemini-2.5-pro"
                 self.client = genai.GenerativeModel(self.model)
             except ImportError:
                 print("Error: google-generativeai package not installed. Install with: pip install google-generativeai")
@@ -266,14 +266,89 @@ Return ONLY a valid JSON object, no other text."""
             import google.generativeai as genai
             
             # Gemini expects PIL Image directly
+            # Add safety settings to be more permissive for financial documents
+            safety_settings = {
+                "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+            }
+            
             response = self.client.generate_content(
                 [prompt, image],
                 generation_config=genai.GenerationConfig(
                     temperature=0.1,
                     max_output_tokens=2000,
-                )
+                ),
+                safety_settings=safety_settings
             )
             
+            # Check if response was blocked
+            if response.prompt_feedback.block_reason:
+                reason = response.prompt_feedback.block_reason
+                print(f"⚠ Warning: Gemini blocked the prompt. Reason: {reason}")
+                return {
+                    "is_aligned": False,
+                    "is_reasonable": False,
+                    "llm_note": f"Gemini blocked content due to: {reason}. Try with --provider anthropic",
+                    "confidence": 0.0,
+                    "amounts_found": [],
+                    "missing_amounts": [],
+                    "incorrect_amounts": []
+                }
+            
+            # Check finish reason
+            if not response.candidates:
+                print("⚠ Warning: No response candidates returned")
+                return {
+                    "is_aligned": False,
+                    "is_reasonable": False,
+                    "llm_note": "No response from Gemini. Try with --provider anthropic",
+                    "confidence": 0.0,
+                    "amounts_found": [],
+                    "missing_amounts": [],
+                    "incorrect_amounts": []
+                }
+            
+            candidate = response.candidates[0]
+            finish_reason = candidate.finish_reason
+            
+            # finish_reason: 1=STOP (success), 2=SAFETY, 3=RECITATION, 4=OTHER
+            if finish_reason == 2:
+                print(f"⚠ Warning: Response blocked by safety filters")
+                return {
+                    "is_aligned": False,
+                    "is_reasonable": False,
+                    "llm_note": "Gemini safety filters blocked this content. Try with --provider anthropic or --provider openai",
+                    "confidence": 0.0,
+                    "amounts_found": [],
+                    "missing_amounts": [],
+                    "incorrect_amounts": []
+                }
+            elif finish_reason == 3:
+                print(f"⚠ Warning: Response blocked due to recitation")
+                return {
+                    "is_aligned": False,
+                    "is_reasonable": False,
+                    "llm_note": "Gemini blocked due to recitation. Try with --provider anthropic",
+                    "confidence": 0.0,
+                    "amounts_found": [],
+                    "missing_amounts": [],
+                    "incorrect_amounts": []
+                }
+            elif finish_reason not in [1, None]:
+                print(f"⚠ Warning: Unexpected finish_reason: {finish_reason}")
+                return {
+                    "is_aligned": False,
+                    "is_reasonable": False,
+                    "llm_note": f"Gemini returned unexpected finish_reason: {finish_reason}",
+                    "confidence": 0.0,
+                    "amounts_found": [],
+                    "missing_amounts": [],
+                    "incorrect_amounts": []
+                }
+            
+            # Get the text content
             content = response.text
             # Extract JSON from response
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
@@ -287,12 +362,37 @@ Return ONLY a valid JSON object, no other text."""
             return {
                 "is_aligned": False,
                 "is_reasonable": False,
-                "llm_note": f"Error calling LLM: {str(e)}",
+                "llm_note": f"Error calling Gemini: {str(e)}. Try with --provider anthropic or --provider openai",
                 "confidence": 0.0,
                 "amounts_found": [],
                 "missing_amounts": [],
                 "incorrect_amounts": []
             }
+
+
+def resize_image_if_needed(image: Image.Image, max_pixels: int = 16_000_000) -> Image.Image:
+    """
+    Resize image if it exceeds maximum pixel count.
+    
+    Args:
+        image: PIL Image object
+        max_pixels: Maximum number of pixels (default: 16M for Gemini)
+        
+    Returns:
+        Resized PIL Image if needed, otherwise original
+    """
+    current_pixels = image.width * image.height
+    
+    if current_pixels <= max_pixels:
+        return image
+    
+    # Calculate scaling factor
+    scale = (max_pixels / current_pixels) ** 0.5
+    new_width = int(image.width * scale)
+    new_height = int(image.height * scale)
+    
+    print(f"  Resizing large image: {image.width}x{image.height} -> {new_width}x{new_height}")
+    return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
 
 def concatenate_images_vertically(images: List) -> Image.Image:
@@ -344,43 +444,66 @@ def extract_bounding_boxes(pdf_path: str) -> Dict[int, List[Dict]]:
         Dictionary mapping page number to list of bounding boxes for money amounts
     """
     if PaddleOCR is None:
-        print("Warning: PaddleOCR not available, skipping bbox extraction")
+        print("  ⚠ PaddleOCR not available, skipping bbox extraction")
         return {}
     
     try:
-        ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+        print("  Initializing PaddleOCR...")
+        ocr = PaddleOCR(use_angle_cls=True, lang='en')
         images = convert_from_path(pdf_path, dpi=200)
         
         all_bboxes = {}
         
         for page_num, image in enumerate(images, start=1):
+            print(f"  Processing page {page_num}/{len(images)} for bounding boxes...")
             image_np = np.array(image)
-            result = ocr.ocr(image_np, cls=True)
+            result = ocr.predict(image_np)
             
             page_bboxes = []
             if result and result[0]:
                 for line in result[0]:
-                    if line and len(line) >= 2:
-                        bbox = line[0]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                        text = line[1][0]
-                        confidence = line[1][1]
-                        
-                        # Check if text contains money amount
-                        if re.search(r'\$\d+|(?:refund|payment|amount|balance|due|owe|paid|tax)\s*\d+', text, re.IGNORECASE):
-                            page_bboxes.append({
-                                'bbox': bbox,
-                                'text': text,
-                                'confidence': confidence,
-                                'page': page_num
-                            })
+                    try:
+                        if line and len(line) >= 2:
+                            bbox = line[0]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                            
+                            # Handle different PaddleOCR result formats
+                            if isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
+                                text = line[1][0] if line[1][0] else ""
+                                confidence = line[1][1] if len(line[1]) > 1 else 0.0
+                            elif isinstance(line[1], str):
+                                text = line[1]
+                                confidence = 1.0
+                            else:
+                                continue
+                            
+                            # Check if text contains money amount
+                            if text and re.search(r'\$\d+|(?:refund|payment|amount|balance|due|owe|paid|tax)\s*\d+', text, re.IGNORECASE):
+                                page_bboxes.append({
+                                    'bbox': bbox,
+                                    'text': text,
+                                    'confidence': confidence,
+                                    'page': page_num
+                                })
+                    except (IndexError, TypeError, AttributeError) as e:
+                        # Skip malformed results
+                        continue
             
             if page_bboxes:
                 all_bboxes[page_num] = page_bboxes
+                print(f"  ✓ Found {len(page_bboxes)} money amounts on page {page_num}")
+        
+        if all_bboxes:
+            total_found = sum(len(bboxes) for bboxes in all_bboxes.values())
+            print(f"  ✓ Total bounding boxes extracted: {total_found}")
+        else:
+            print(f"  ⚠ No money amount bounding boxes found")
         
         return all_bboxes
         
     except Exception as e:
-        print(f"Warning: Error extracting bboxes: {e}")
+        import traceback
+        print(f"  ⚠ Warning: Error extracting bboxes: {e}")
+        print(f"  Debug traceback: {traceback.format_exc()}")
         return {}
 
 
@@ -414,7 +537,7 @@ def validate_parquet(input_path: str, output_path: str, provider: str = "openai"
     df['missing_amounts'] = None
     df['incorrect_amounts'] = None
     
-    # Process each row
+    # Process each row - relative path
     for idx, row in df.iterrows():
         pdf_filename = row['pdf_url']
         money_amounts = row.get('money_amounts', '')
@@ -469,6 +592,9 @@ def validate_parquet(input_path: str, output_path: str, provider: str = "openai"
             # For multi-page, concatenate all pages vertically
             print(f"Multi-page document ({len(images)} pages), concatenating all pages...")
             main_image = concatenate_images_vertically(images)
+        
+        # Resize if image is too large (especially for Gemini)
+        main_image = resize_image_if_needed(main_image)
         
         # Call LLM judge
         print("Calling LLM for validation...")
